@@ -1,0 +1,2 @@
+# squidAdmin
+A squid admin 
