@@ -10,6 +10,7 @@ use POSIX qw(strftime);
 use File::Basename;
 use Data::Dumper;
 use Storable qw( lock_store lock_retrieve );
+use Data::Uniqid qw ( suniqid uniqid luniqid );
 ##################  Conexion a BD mySql y variables ####################
 my $path = dirname(__FILE__);
 
@@ -63,18 +64,14 @@ while(<$envFh>) {
 }
 close $envFh;
 
-
-
 if (! -d $stateDir) {
 	mkdir $stateDir;
 }
 if (! -d $tmpLogDir) {
-	
 	mkdir $tmpLogDir;
 }
 
 
-   
 # DSN config
 my $dsn = "DBI:$dbDriver:database=$database;host=$dbHost";
 my $dbh;
@@ -128,8 +125,83 @@ sub getLogFileUrl() {
 	
 }
 
-getLogFileUrl();
 $cache=getState($cacheFile);
+## SQL query
+my $sqlSearchUser ="SELECT id FROM users  WHERE username=?";
+
+my $sqlAddUser ="INSERT INTO users VALUES(NULL,?,'squid',?,NOW(),'squid',1,0,null,NOW(),NOW())";
+my $handleSearchUser = $dbh->prepare($sqlSearchUser);
+my $handleAddUser = $dbh->prepare($sqlAddUser);
+
+my $sqlSearchDomain ="SELECT id,is_interest,percent_interest FROM domain WHERE name = ?";
+my $sqlAddDomain ="INSERT INTO domain VALUES(NULL,?,?,?,NOW(),NOW())";
+my $handleSearchDomain= $dbh->prepare($sqlSearchDomain);
+my $handleAddDomain= $dbh->prepare($sqlAddDomain);
+
+my $sqlAddLog ="INSERT INTO loginfo VALUES(NULL,?,?,?,?,?,?,?,?,NOW(),NOW(),?,?)";
+my $handleAddLog= $dbh->prepare($sqlAddLog);
+
+sub searchDomain($) {
+    my $domain = shift (@_);
+	if(not defined $$cache{$domain}{"id"}){
+		logInfo("the domain is not indexed, searching on db $domain");
+		
+		$handleSearchDomain->execute($domain);
+		my @row = $handleSearchDomain->fetchrow_array();
+		my ($domain_id,$domain_interest,$percent) = @row;
+		
+		if(not defined $domain_id){
+			logInfo("is not on DB adding $domain");
+			$domain_interest =0;
+			$percent =0;
+			if( $domain =~ m/\.cu$/){
+				$domain_interest =1;
+				$percent =100;
+			}	
+			$handleAddDomain->execute($domain,$domain_interest,$percent);
+			$domain_id = $handleAddDomain->last_insert_id();
+		}
+		
+		$$cache{$domain}{"id"}=$domain_id;
+		$$cache{$domain}{"interest"}=$domain_interest;
+		$$cache{$domain}{"percent"}=$percent;
+	
+		putState($cacheFile,$cache);
+	}
+	return $$cache{$domain}{"id"};
+	
+}
+
+sub searchUser($) {
+    my $user = shift (@_);
+	if(not defined $$cache{"users"}{$user}){
+		logInfo("the user is not indexed, searching on db $user");
+		
+		$handleSearchUser->execute($user);
+		my @row = $handleSearchUser->fetchrow_array();
+		my ($userId) = @row;
+		
+		if(not defined $userId){
+			logInfo("is not on DB adding $user");
+			my $uniqid = suniqid;
+
+			$handleAddUser->execute($user,"$uniqid\@localhost");
+			$userId = $handleAddUser->last_insert_id();
+			
+		}
+		
+		$$cache{"users"}{$user}=$userId;
+		
+
+	
+		putState($cacheFile,$cache);
+	}
+	return $$cache{"users"}{$user};
+	
+}
+#search for access log url on db
+getLogFileUrl();
+
 
 #ciclo principal
 logInfo("reading $logFile.\n");
@@ -154,8 +226,7 @@ while(<$file_handle>) {
 #	1541417160.906   1115 10.0.1.252 TCP_MISS/200 32353 CONNECT www.youtube.com:443 roilan FIRSTUP_PARENT/192.168.100.4 -	
 
 	  if ( (m#^(\d+)\.\d+\s+(\d+)\s+([^\s]+)\s+(\w+)/(\d+)\s+(\d+)\s+(\w+)\s+([^\s]+)\s+([\w\-\.]+)\s+(\w+)/([\w\.\-]+)\s+([\w\/\-]*)\s*(.*)#)) {
-		$lineNumber++;
-		logInfo("reading line ".$lineNumber);
+
 		# 0=date 1=transfer-msec? 2=ipaddr 3=status/code 4=size 5=operation
 		# 6=url 7=user 8=method/connected-to... 9=content-type
 		my $stamp=$1;
@@ -173,8 +244,6 @@ while(<$file_handle>) {
 		my $mime   = $12;
 	    my $mac   = ($13 eq ""?"-":$13);
 
-	
-		
 		if( $url =~ m/(NONE:\/|internal:\/)/ ){
 			logInfo("skiping invalid line  $lineNumber - $url");
 			next;
@@ -190,6 +259,7 @@ while(<$file_handle>) {
         if ($url eq "http://detectportal.firefox.com/success.txt"){
             next;
         }
+		if($status eq "TCP_DENIED" ){next;}
 		
 		if( $url =~ m/:\d+/){
 			if( $url =~ m/:443/){
@@ -202,22 +272,41 @@ while(<$file_handle>) {
 		}
 		
 		my $u1 = URI->new($url); 
-		if ($lineNumber eq 1){
+		if ($lineNumber eq 0){
 			$tmpLogFile = $tmpLogDir.$stamp.".db";
 			logInfo("first line, get cache ".$tmpLogFile." ");
 			$cacheLog = getState($tmpLogFile);
 			if (defined $$cacheLog{"locked"}){
 				logInfo("previously read file  $tmpLogFile");
 				if($$cacheLog{"locked"}){
+					my $tmpPointer = $$cacheLog{"pointer"};
 					logInfo("pointer in use, waiting 5 seconds ");
 					sleep(5);
+					$cacheLog = getState($tmpLogFile);
+					if( $tmpPointer ne $$cacheLog{"pointer"}){
+						logInfo("pointer in use, finish");
+						last;
+					}
 				}
+				logInfo("skiping reded lines");
+				seek($file_handle,$$cacheLog{"pointer"},1);
+				next;
 			}else{
 				logInfo("first time reading the file, locking  $tmpLogFile");
 				$$cacheLog{"locked"} = 1;
 			}
 		}
+		$lineNumber++;
+		logInfo("reading  ".$lineNumber);		
+		my $domainId= searchDomain($u1->host);
+		my $internalSize = $bytes;
+		if($$cache{$u1->host}{"interest"}){
+			$internalSize=$internalSize-($internalSize*$$cache{$u1->host}{"percent"}/100);
+		}		
+		my $userId = searchUser($user);
 		
+
+		$handleAddLog->execute($date,$ip,$status."/".$code,$bytes,$method,$url,$mime,$internalSize,$userId,$domainId);
 		$$cacheLog{"pointer"} = tell($file_handle);
 		putState($tmpLogFile,$cacheLog);
 
@@ -228,7 +317,10 @@ while(<$file_handle>) {
 $$cacheLog{"locked"} = 0;
 putState($tmpLogFile,$cacheLog);
 logInfo("end of file. $lineNumber lines");
-
+$handleSearchDomain->finish();
+$handleAddDomain->finish();
+$handleAddUser->finish();
+$handleSearchUser->finish();
 $dbh->disconnect();
 
 close $file_handle;
