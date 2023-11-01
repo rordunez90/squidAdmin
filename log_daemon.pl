@@ -129,16 +129,16 @@ $cache=getState($cacheFile);
 ## SQL query
 my $sqlSearchUser ="SELECT id FROM users  WHERE username=?";
 
-my $sqlAddUser ="INSERT INTO users VALUES(NULL,?,'squid',?,NOW(),'squid',1,0,null,NOW(),NOW())";
+my $sqlAddUser ="INSERT INTO users(username,name,email,email_verified_at,password,cuota,active,remember_token,created_at,updated_at) VALUES(?,'squid',?,NOW(),'squid',1,?,null,NOW(),NOW())";
 my $handleSearchUser = $dbh->prepare($sqlSearchUser);
 my $handleAddUser = $dbh->prepare($sqlAddUser);
 
 my $sqlSearchDomain ="SELECT id,is_interest,percent_interest FROM domain WHERE name = ?";
-my $sqlAddDomain ="INSERT INTO domain VALUES(NULL,?,?,?,NOW(),NOW())";
+my $sqlAddDomain ="INSERT INTO domain(name,is_interest,percent_interest,created_at,updated_at) VALUES(?,?,?,NOW(),NOW())";
 my $handleSearchDomain= $dbh->prepare($sqlSearchDomain);
 my $handleAddDomain= $dbh->prepare($sqlAddDomain);
 
-my $sqlAddLog ="INSERT INTO loginfo VALUES(NULL,?,?,?,?,?,?,?,?,NOW(),NOW(),?,?)";
+my $sqlAddLog ="INSERT INTO loginfo(date,ip,status_code,size,operation,url,content_tipe,internal_size,created_at,updated_at,user_id,domain_id) VALUES(?,?,?,?,?,?,?,?,NOW(),NOW(),?,?)";
 my $handleAddLog= $dbh->prepare($sqlAddLog);
 
 sub searchDomain($) {
@@ -159,14 +159,14 @@ sub searchDomain($) {
 				$percent =100;
 			}	
 			$handleAddDomain->execute($domain,$domain_interest,$percent);
-			$domain_id = $handleAddDomain->last_insert_id();
+			$domain_id = $handleAddDomain->last_insert_id(undef, undef, "domain", undef);
 		}
 		
 		$$cache{$domain}{"id"}=$domain_id;
 		$$cache{$domain}{"interest"}=$domain_interest;
 		$$cache{$domain}{"percent"}=$percent;
 	
-		putState($cacheFile,$cache);
+		#putState($cacheFile,$cache);
 	}
 	return $$cache{$domain}{"id"};
 	
@@ -184,9 +184,9 @@ sub searchUser($) {
 		if(not defined $userId){
 			logInfo("is not on DB adding $user");
 			my $uniqid = suniqid;
-
-			$handleAddUser->execute($user,"$uniqid\@localhost");
-			$userId = $handleAddUser->last_insert_id();
+			my $active = $dbDriver eq "Pg" ? false : 0;
+			$handleAddUser->execute($user,"$uniqid\@localhost",$active);
+			$userId = $handleAddUser->last_insert_id((undef, undef, "users", undef));
 			
 		}
 		
@@ -206,6 +206,7 @@ getLogFileUrl();
 #ciclo principal
 logInfo("reading $logFile.\n");
 my $lineNumber=0;
+my $start=0;
 open(my $file_handle, '<', $logFile) or die "could not open open ! $!";
 
 
@@ -244,6 +245,32 @@ while(<$file_handle>) {
 		my $mime   = $12;
 	    my $mac   = ($13 eq ""?"-":$13);
 
+		if ($start eq 0){
+			$start = 1;
+			$tmpLogFile = $tmpLogDir.$stamp.".db";
+			logInfo("first line, get cache ".$tmpLogFile." ");
+			$cacheLog = getState($tmpLogFile);
+			if (defined $$cacheLog{"locked"}){
+				logInfo("previously read file  $tmpLogFile");
+				if($$cacheLog{"locked"}){
+					my $tmpPointer = $$cacheLog{"pointer"};
+					logInfo("pointer in use, waiting 5 seconds ");
+					sleep(5);
+					$cacheLog = getState($tmpLogFile);
+					if( $tmpPointer ne $$cacheLog{"pointer"}){
+						logInfo("pointer in use, finish");
+						last;
+					}
+				}
+				logInfo("skiping reded lines ".$$cacheLog{"pointer"});
+				seek($file_handle,$$cacheLog{"pointer"},0);
+				next;
+			}else{
+				logInfo("first time reading the file, locking  $tmpLogFile");
+				$$cacheLog{"locked"} = 1;
+			}
+		}
+
 		if( $url =~ m/(NONE:\/|internal:\/)/ ){
 			logInfo("skiping invalid line  $lineNumber - $url");
 			next;
@@ -272,30 +299,7 @@ while(<$file_handle>) {
 		}
 		
 		my $u1 = URI->new($url); 
-		if ($lineNumber eq 0){
-			$tmpLogFile = $tmpLogDir.$stamp.".db";
-			logInfo("first line, get cache ".$tmpLogFile." ");
-			$cacheLog = getState($tmpLogFile);
-			if (defined $$cacheLog{"locked"}){
-				logInfo("previously read file  $tmpLogFile");
-				if($$cacheLog{"locked"}){
-					my $tmpPointer = $$cacheLog{"pointer"};
-					logInfo("pointer in use, waiting 5 seconds ");
-					sleep(5);
-					$cacheLog = getState($tmpLogFile);
-					if( $tmpPointer ne $$cacheLog{"pointer"}){
-						logInfo("pointer in use, finish");
-						last;
-					}
-				}
-				logInfo("skiping reded lines");
-				seek($file_handle,$$cacheLog{"pointer"},1);
-				next;
-			}else{
-				logInfo("first time reading the file, locking  $tmpLogFile");
-				$$cacheLog{"locked"} = 1;
-			}
-		}
+
 		$lineNumber++;
 		logInfo("reading  ".$lineNumber);		
 		my $domainId= searchDomain($u1->host);
@@ -308,6 +312,7 @@ while(<$file_handle>) {
 
 		$handleAddLog->execute($date,$ip,$status."/".$code,$bytes,$method,$url,$mime,$internalSize,$userId,$domainId);
 		$$cacheLog{"pointer"} = tell($file_handle);
+		logInfo("pointer  ".$$cacheLog{"pointer"});	
 		putState($tmpLogFile,$cacheLog);
 
 	

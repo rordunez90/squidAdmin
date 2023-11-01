@@ -1,5 +1,5 @@
 {
-    "name": "squidAdmin",
+    "name": "squidadmin",
     "type": "project",
     "description": "squid proxy web admin page",
     "keywords": ["laravel", "vueJS", "squid"],

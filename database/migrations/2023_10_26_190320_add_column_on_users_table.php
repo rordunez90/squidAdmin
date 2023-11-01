@@ -14,7 +14,7 @@ return new class extends Migration
         Schema::table('users', function (Blueprint $table) {
             $table->string('username')->after('id')->unique();
             $table->boolean('active')->after('password');
-            $table->boolean('cuota')->after('password');
+            $table->integer('cuota')->after('password');
 
         });
     }
